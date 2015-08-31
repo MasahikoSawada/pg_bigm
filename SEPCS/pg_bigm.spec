@@ -22,18 +22,18 @@ URL:        http://pgbigm.osdn.jp/index_en.html
 BuildRoot:  %{_tmppath}/%{name}-%{version}-%{release}-%(%{__id_u} -n)
 Vendor:     NTT DATA CORPORATION
 
-## We use postgresql-devel package
+## Requires of pg_bigm
 BuildRequires:  postgresql94-devel
 Requires:  postgresql94-libs
 
-## Description for "pg_bigm"
+## Description for pg_bigm
 %description
 The pg_bigm module provides full text search capability in PostgreSQL.
 This module allows a user to create 2-gram (bigram) index for faster full text search.
 
 Note that this package is available for only PostgreSQL 9.4.
 
-## Preparation for building "pg_bigm"
+## Preparation for building pg_bigm
 %prep
 PATH=/usr/pgsql-9.4/bin:$PATH
 if [ "${MAKE_ROOT}" != "" ]; then
