@@ -10,7 +10,7 @@
   %define _sourcedir %(echo ${MAKE_ROOT})
 %endif
 
-## Set general information for pg_hint_plan.
+## Set general information for pg_bigm.
 Summary:    2-gram full text search for 9.4
 Name:       pg_bigm
 Version:    1.1.201509011
@@ -18,7 +18,7 @@ Release:    1.pg94.%{?dist}
 License:    PostgreSQL License
 Group:      Applications/Databases
 Source0:    %{name}-%{version}.tar.gz
-#URL:        http://example.com/pg_hint_plan/
+URL:        http://pgbigm.osdn.jp/index_en.html
 BuildRoot:  %{_tmppath}/%{name}-%{version}-%{release}-%(%{__id_u} -n)
 Vendor:     NTT DATA CORPORATION
 
@@ -33,7 +33,7 @@ This module allows a user to create 2-gram (bigram) index for faster full text s
 
 Note that this package is available for only PostgreSQL 9.4.
 
-## pre work for build pg_hint_plan
+## Preparation for building "pg_bigm"
 %prep
 PATH=/usr/pgsql-9.4/bin:$PATH
 if [ "${MAKE_ROOT}" != "" ]; then
@@ -68,7 +68,7 @@ rm -rf %{buildroot}
 %{_datadir}/extension/pg_bigm--1.2.sql
 %{_datadir}/extension/pg_bigm.control
 
-# History of pg_hint_plan.
+# Change log of pg_bigm.
 %changelog
 * Thu Sep 11 2015 Masahiko Sawada <sawada.mshk@gmail.com>
 - Initial cut for 1.2.20150911
