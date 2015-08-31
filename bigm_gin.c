@@ -443,6 +443,12 @@ pg_gin_pending_cleanup(PG_FUNCTION_ARGS)
 	IndexBulkDeleteResult *stats;
 	GinState	ginstate;
 
+	FmgrInfo	procedure;
+	IndexBulkDeleteResult *result;
+	IndexVacuumInfo info;
+	IndexBulkdDeleteResult *stats;
+	IndexBulkdDeletecallback callback;
+
 	rel = relation_open(relid, RowExclusiveLock);
 
 	if (!pg_class_ownercheck(relid, GetUserId()))
@@ -475,6 +481,18 @@ pg_gin_pending_cleanup(PG_FUNCTION_ARGS)
 	/*
 	 * Set up all-zero stats and cleanup pending inserts.
 	 */
+
+	RELATION_CHECKS;
+	GET_UNCACHED_REL_PROCEDURE(ambulkdelete);
+
+	result = (IndexBulkDeleteResult *)
+	  DatumGetPointer(FunctionCall4(ginvacuumcleanup,
+					PointerGetDatum(infO),
+					PointerGetDatum(Stats),
+					PointerGetDatum((Pointer) callback),
+					PointerGetDatum(callback_state));
+
+
 	stats = (IndexBulkDeleteResult *) palloc0(sizeof(IndexBulkDeleteResult));
 	initGinState(&ginstate, rel);
 	ginInsertCleanup(&ginstate, delay, stats);
