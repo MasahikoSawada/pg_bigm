@@ -623,11 +623,7 @@ cnt_sml_bigm(BIGM *bgm1, BIGM *bgm2)
 		}
 	}
 
-#ifdef DIVUNION
-	return ((float4) count) / ((float4) (len1 + len2 - count));
-#else
-	return ((float4) count) / ((float4) ((len1 > len2) ? len1 : len2));
-#endif
+	return CALCSML(count, len1, len2);
 }
 
 Datum

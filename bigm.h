@@ -68,6 +68,18 @@ typedef struct
 #define GETARR(x)		( (bigm *)( (char*)x + VARHDRSZ ) )
 #define ARRNELEM(x) ( ( VARSIZE(x) - VARHDRSZ )/sizeof(bigm) )
 
+/*
+ * If DIVUNION is defined then similarity formula is:
+ * count / (len1 + len2 - count)
+ * else if DIVUNION is not defined then similarity formula is:
+ * count / max(len1, len2)
+ */
+#ifdef DIVUNION
+#define CALCSML(count, len1, len2) ((float4) (count)) / ((float4) ((len1) + (len2) - (count)))
+#else
+#define CALCSML(count, len1, len2) ((float4) (count)) / ((float4) (((len1) > (len2)) ? (len1) : (len2)))
+#endif
+
 extern BIGM *generate_bigm(char *str, int slen);
 extern BIGM *generate_wildcard_bigm(const char *str, int slen, bool *removeDups);
 
