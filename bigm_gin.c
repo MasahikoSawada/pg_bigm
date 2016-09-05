@@ -157,6 +157,7 @@ gin_extract_query_bigm(PG_FUNCTION_ARGS)
 				*recheck = true;
 			break;
 		}
+		case WordSimilarityStrategyNumber:
 		case SimilarityStrategyNumber:
 		{
 			bgm = generate_bigm(VARDATA(val), VARSIZE(val) - VARHDRSZ);
@@ -216,6 +217,7 @@ gin_bigm_consistent(PG_FUNCTION_ARGS)
 	bool		res;
 	int32		i;
 	int32		ntrue;
+	double		nlimit;
 
 	switch (strategy)
 	{
@@ -241,10 +243,14 @@ gin_bigm_consistent(PG_FUNCTION_ARGS)
 				}
 			}
 			break;
+		case WordSimilarityStrategyNumber:
 		case SimilarityStrategyNumber:
 			/* Count the matches */
 			*recheck = bigm_enable_recheck;
 			ntrue = 0;
+			nlimit = (strategy == SimilarityStrategyNumber) ?
+				bigm_similarity_limit : bigm_word_similarity_limit;
+
 			for (i = 0; i < nkeys; i++)
 			{
 				if (check[i])
@@ -268,7 +274,7 @@ gin_bigm_consistent(PG_FUNCTION_ARGS)
 			 */
 			res = (nkeys == 0) ? false :
 				((((((float4) ntrue) / ((float4) nkeys))) >=
-				  (float4) bigm_similarity_limit) ? true : false);
+				  (float4) nlimit) ? true : false);
 			break;
 		default:
 			elog(ERROR, "unrecognized strategy number: %d", strategy);
@@ -293,6 +299,7 @@ gin_bigm_triconsistent(PG_FUNCTION_ARGS)
 	GinTernaryValue	res = GIN_MAYBE;
 	int32		i,
 				ntrue;
+	double		nlimit;
 
 	switch (strategy)
 	{
@@ -316,7 +323,11 @@ gin_bigm_triconsistent(PG_FUNCTION_ARGS)
 				}
 			}
 			break;
+		case WordSimilarityStrategyNumber:
 		case SimilarityStrategyNumber:
+			nlimit = (strategy == SimilarityStrategyNumber) ?
+				bigm_similarity_limit : bigm_word_similarity_limit;
+
 			/* Count the matches */
 			ntrue = 0;
 			for (i = 0; i < nkeys; i++)
@@ -330,7 +341,7 @@ gin_bigm_triconsistent(PG_FUNCTION_ARGS)
 			 */
 			res = (nkeys == 0) ? GIN_FALSE :
 				(((((float4) ntrue) / ((float4) nkeys)) >=
-				  (float4) bigm_similarity_limit) ? GIN_MAYBE : GIN_FALSE);
+				  (float4) nlimit) ? GIN_MAYBE : GIN_FALSE);
 
 			if (res != GIN_FALSE && !bigm_enable_recheck)
 				res = GIN_TRUE;

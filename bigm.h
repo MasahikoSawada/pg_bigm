@@ -21,6 +21,7 @@
 extern bool bigm_enable_recheck;
 extern int	bigm_gin_key_limit;
 extern double bigm_similarity_limit;
+extern double bigm_word_similarity_limit;
 extern char	*bigm_last_update;
 
 /* options */
@@ -28,8 +29,9 @@ extern char	*bigm_last_update;
 #define RPADDING		1
 
 /* operator strategy numbers */
-#define LikeStrategyNumber			1
-#define SimilarityStrategyNumber	2
+#define LikeStrategyNumber				1
+#define SimilarityStrategyNumber		2
+#define WordSimilarityStrategyNumber	3
 
 typedef struct
 {

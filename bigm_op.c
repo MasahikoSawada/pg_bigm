@@ -30,6 +30,7 @@ PG_MODULE_MAGIC;
 bool		bigm_enable_recheck = false;
 int			bigm_gin_key_limit = 0;
 double		bigm_similarity_limit = 0.3;
+double		bigm_word_similarity_limit = 0.3;
 char	   *bigm_last_update = NULL;
 
 PG_FUNCTION_INFO_V1(show_bigm);
@@ -37,6 +38,16 @@ PG_FUNCTION_INFO_V1(bigmtextcmp);
 PG_FUNCTION_INFO_V1(likequery);
 PG_FUNCTION_INFO_V1(bigm_similarity);
 PG_FUNCTION_INFO_V1(bigm_similarity_op);
+PG_FUNCTION_INFO_V1(bigm_word_similarity);
+PG_FUNCTION_INFO_V1(bigm_word_similarity_op);
+PG_FUNCTION_INFO_V1(bigm_word_similarity_commutator_op);
+
+/* Bigram with position */
+typedef struct
+{
+	bigm	bgm;
+	int		index;
+} pos_bigm;
 
 /*
  * The function prototypes are created as a part of PG_FUNCTION_INFO_V1
@@ -96,6 +107,19 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+		DefineCustomRealVariable("pg_bigm.word_similarity_limit",
+							 "Sets the word similarity threshold used by the "
+							 "<=% or =$> operator.",
+							 NULL,
+							 &bigm_word_similarity_limit,
+							 0.6,
+							 0.0, 1.0,
+							 PGC_USERSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	/* Can't be set in postgresql.conf */
 	DefineCustomStringVariable("pg_bigm.last_update",
 							   "Shows the last update date of pg_bigm.",
@@ -128,6 +152,28 @@ comp_bigm(const void *a, const void *b, void *arg)
 		*haveDups = true;
 
 	return res;
+}
+
+/*
+ * Compare position bigrams: compare bigmrams first and position second.
+ */
+static int
+comp_pbigm(const void *v1, const void *v2)
+{
+	const pos_bigm *p1 = (const pos_bigm *) v1;
+	const pos_bigm *p2 = (const pos_bigm *) v2;
+	int			cmp;
+
+	cmp = CMPBIGM(&(p1->bgm),&(p2->bgm));
+	if (cmp != 0)
+		return cmp;
+
+	if (p1->index < p2->index)
+		return -1;
+	else if (p1->index == p2->index)
+		return 0;
+	else
+		return 1;
 }
 
 static int
@@ -180,7 +226,7 @@ find_word(char *str, int lenstr, char **endword, int *charlen)
 }
 
 /*
- * The function is named compact_bigram to maintain consistency with pg_trgm,
+ * The function is named compact_bigram to maintain consistency with pg_bigm,
  * though it does not reduce multibyte characters to hash values like in
  * compact_trigram.
  */
@@ -549,6 +595,335 @@ generate_wildcard_bigm(const char *str, int slen, bool *removeDups)
 	return bgm;
 }
 
+/*
+ * Guard against possible overflow in the palloc requests below.  (We
+ * don't worry about the additive constants, since palloc can detect
+ * requests that are a little above MaxAllocSize --- we just need to
+ * prevent integer overflow in the multiplications.)
+ */
+static void
+protect_out_of_mem(int slen)
+{
+	if ((Size) (slen / 2) >= (MaxAllocSize / (sizeof(bigm) * 3)) ||
+		(Size) slen >= (MaxAllocSize / pg_database_encoding_max_length()))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("out of memory")));
+}
+
+/*
+ * Make array of positional bigrams from two bigram arrays bgm1 and bgm2.
+ *
+ * bgm1: bigram array of search pattern, of length len1. bgm1 is required
+ *		 word which positions don't matter and replaced with -1.
+ * bgm2: bigram array of text, of length len2. bgm2 is haystack where we
+ *		 search and have to store its positions.
+ *
+ * Returns concatenated bigram array.
+ */
+static pos_bigm *
+make_positional_bigm(bigm *bgm1, int len1, bigm *bgm2, int len2)
+{
+	pos_bigm   *result;
+	int			i,
+				len = len1 + len2;
+
+	result = (pos_bigm *) palloc(sizeof(pos_bigm) * len);
+
+	for (i = 0; i < len1; i++)
+	{
+		memcpy(&result[i].bgm, &bgm1[i], sizeof(bigm));
+		result[i].index = -1;
+	}
+
+	for (i = 0; i < len2; i++)
+	{
+		memcpy(&result[i + len1].bgm, &bgm2[i], sizeof(bigm));
+		result[i + len1].index = i;
+	}
+
+	return result;
+}
+/*
+ * Iterative search function which calculates maximum similarity with word in
+ * the string. But maximum similarity is calculated only if check_only == false.
+ *
+ * bgm2indexes: array which stores indexes of the array "found".
+ * found: array which stores true of false values.
+ * ulen1: count of unique bigrams of array "bgm1".
+ * len2: length of array "bgm2" and array "bgm2indexes".
+ * len: length of the array "found".
+ * check_only: if true then only check existaince of similar search pattern in
+ *			   text.
+ *
+ * Returns word similarity.
+ */
+static float4
+iterate_word_similarity(int *bgm2indexes,
+						bool *found,
+						int ulen1,
+						int len2,
+						int len,
+						bool check_only)
+{
+	int		   *lastpos,
+				i,
+				ulen2 = 0,
+				count = 0,
+				upper = -1,
+				lower = -1;
+	float4		smlr_cur,
+				smlr_max = 0.0f;
+
+	/* Memorise last position of each bigram */
+	lastpos = (int *) palloc(sizeof(int) * len);
+	memset(lastpos, -1, sizeof(int) * len);
+
+	for (i = 0; i < len2; i++)
+	{
+		/* Get index of next bigram */
+		int			bgmindex = bgm2indexes[i];
+
+		/* Update last position of this bigram */
+		if (lower >= 0 || found[bgmindex])
+		{
+			if (lastpos[bgmindex] < 0)
+			{
+				ulen2++;
+				if (found[bgmindex])
+					count++;
+			}
+			lastpos[bgmindex] = i;
+		}
+
+		/* Adjust lower bound if this bigram is present in required substing */
+		if (found[bgmindex])
+		{
+			int			prev_lower,
+						tmp_ulen2,
+						tmp_lower,
+						tmp_count;
+
+			upper = i;
+			if (lower == -1)
+			{
+				lower = i;
+				ulen2 = 1;
+			}
+
+			smlr_cur = CALCSML(count, ulen1, ulen2);
+
+			/* Also try to adjust upper bound for greater similarity */
+			tmp_count = count;
+			tmp_ulen2 = ulen2;
+			prev_lower = lower;
+			for (tmp_lower = lower; tmp_lower <= upper; tmp_lower++)
+			{
+				float		smlr_tmp = CALCSML(tmp_count, ulen1, tmp_ulen2);
+				int			tmp_bgmindex;
+
+				if (smlr_tmp > smlr_cur)
+				{
+					smlr_cur = smlr_tmp;
+					ulen2 = tmp_ulen2;
+					lower = tmp_lower;
+					count = tmp_count;
+				}
+
+				/*
+				 * if we only check that word similarity is greater than
+				 * pg_bgmm.word_similarity_threshold we do not need to
+				 * calculate a maximum similarity.
+				 */
+				if (check_only && smlr_cur >= bigm_word_similarity_limit)
+					break;
+
+				tmp_bgmindex = bgm2indexes[tmp_lower];
+				if (lastpos[tmp_bgmindex] == tmp_lower)
+				{
+					tmp_ulen2--;
+					if (found[tmp_bgmindex])
+						tmp_count--;
+				}
+			}
+
+			smlr_max = Max(smlr_max, smlr_cur);
+
+			/*
+			 * if we only check that word similarity is greater than
+			 * pg_bgmm.word_similarity_threshold we do not need to calculate a
+			 * maximum similarity
+			 */
+			if (check_only && smlr_max >= bigm_word_similarity_limit)
+				break;
+
+			for (tmp_lower = prev_lower; tmp_lower < lower; tmp_lower++)
+			{
+				int			tmp_bgmindex;
+
+				tmp_bgmindex = bgm2indexes[tmp_lower];
+				if (lastpos[tmp_bgmindex] == tmp_lower)
+					lastpos[tmp_bgmindex] = -1;
+			}
+		}
+	}
+
+	pfree(lastpos);
+
+	return smlr_max;
+}
+
+/*
+ * Make array of bigrams without sorting and removing duplicate items.
+ *
+ * trg: where to return the array of bigrams.
+ * str: source string, of length slen bytes.
+ *
+ * Returns length of the generated array.
+ */
+static int
+generate_bigm_only(bigm *bgm, char *str, int slen)
+{
+	bigm	   *bptr;
+	char	   *buf;
+	int			charlen,
+				bytelen;
+	char	   *bword,
+			   *eword;
+
+	if (slen + LPADDING + RPADDING < 3 || slen == 0)
+		return 0;
+
+	bptr = bgm;
+
+	/* Allocate a buffer for case-folded, blank-padded words */
+	buf = (char *) palloc(slen * pg_database_encoding_max_length() + 2);
+
+	eword = str;
+	while ((bword = find_word(eword, slen - (eword - str), &eword, &charlen)) != NULL)
+	{
+#ifdef IGNORECASE
+		bword = lowerstr_with_len(bword, eword - bword);
+		bytelen = strlen(bword);
+#else
+		bytelen = eword - bword;
+#endif
+
+		memcpy(buf, bword, bytelen);
+
+#ifdef IGNORECASE
+		pfree(bword);
+#endif
+
+		/*
+		 * count bigrams
+		 */
+		bptr = make_bigrams(bptr, buf, bytelen,	charlen);
+	}
+
+	pfree(buf);
+
+	return bptr - bgm;
+}
+
+/*
+ * Calculate word similarity.
+ * This function prepare two arrays: "bgm2indexes" and "found". Then this arrays
+ * are used to calculate word similarity using iterate_word_similarity().
+ *
+ * "bgm2indexes" is array which stores indexes of the array "found".
+ * In other words:
+ * bgm2indexes[j] = i;
+ * found[i] = true (or false);
+ * If found[i] == true then there is bigram bgm2[j] in array "bgm1".
+ * If found[i] == false then there is not bigram bgm2[j] in array "bgm1".
+ *
+ * str1: search pattern string, of length slen1 bytes.
+ * str2: text in which we are looking for a word, of length slen2 bytes.
+ * check_only: if true then only check existaince of similar search pattern in
+ *			   text.
+ *
+ * Returns word similarity.
+ */
+static float4
+calc_word_similarity(char *str1, int slen1, char *str2, int slen2,
+					 bool check_only)
+{
+	bool	   *found;
+	pos_bigm   *pbgm;
+	bigm	   *bgm1;
+	bigm	   *bgm2;
+	int			len1,
+				len2,
+				len,
+				i,
+				j,
+				ulen1;
+	int		   *bgm2indexes;
+	float4		result;
+
+	protect_out_of_mem(slen1 + slen2);
+
+	/* Make positional bigrams */
+	bgm1 = (bigm *) palloc(sizeof(bigm) * (slen1 / 2 + 1) *3);
+	bgm2 = (bigm *) palloc(sizeof(bigm) * (slen2 / 2 + 1) *3);
+
+	len1 = generate_bigm_only(bgm1, str1, slen1);
+	len2 = generate_bigm_only(bgm2, str2, slen2);
+
+	pbgm = make_positional_bigm(bgm1, len1, bgm2, len2);
+	len = len1 + len2;
+	qsort(pbgm, len, sizeof(pos_bigm), comp_pbigm);
+
+	pfree(bgm1);
+	pfree(bgm2);
+
+	/*
+	 * Merge positional bigrams array: enumerate each bigram and find its
+	 * presence in required word.
+	 */
+	bgm2indexes = (int *) palloc(sizeof(int) * len2);
+	found = (bool *) palloc0(sizeof(bool) * len);
+
+	ulen1 = 0;
+	j = 0;
+	for (i = 0; i < len; i++)
+	{
+		if (i > 0)
+		{
+			int			cmp = CMPBIGM(&(pbgm[i - 1].bgm), &(pbgm[i].bgm));
+
+			if (cmp != 0)
+			{
+				if (found[j])
+					ulen1++;
+				j++;
+			}
+		}
+
+		if (pbgm[i].index >= 0)
+		{
+			bgm2indexes[pbgm[i].index] = j;
+		}
+		else
+		{
+			found[j] = true;
+		}
+	}
+	if (found[j])
+		ulen1++;
+
+	/* Run iterative procedure to find maximum similarity with word */
+	result = iterate_word_similarity(bgm2indexes, found, ulen1, len2, len,
+									 check_only);
+
+	pfree(bgm2indexes);
+	pfree(found);
+	pfree(pbgm);
+
+	return result;
+}
+
 Datum
 show_bigm(PG_FUNCTION_ARGS)
 {
@@ -649,6 +1024,21 @@ bigm_similarity(PG_FUNCTION_ARGS)
 }
 
 Datum
+bigm_word_similarity(PG_FUNCTION_ARGS)
+{
+	text	*in1 = PG_GETARG_TEXT_PP(0);
+	text	*in2 = PG_GETARG_TEXT_PP(1);
+	float4	res;
+
+	res = calc_word_similarity(VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
+							   VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
+							   true);
+	PG_FREE_IF_COPY(in1, 0);
+	PG_FREE_IF_COPY(in2, 1);
+	PG_RETURN_FLOAT4(res);
+}
+
+Datum
 bigm_similarity_op(PG_FUNCTION_ARGS)
 {
 	float4		res = DatumGetFloat4(DirectFunctionCall2(bigm_similarity,
@@ -656,6 +1046,36 @@ bigm_similarity_op(PG_FUNCTION_ARGS)
 														 PG_GETARG_DATUM(1)));
 
 	PG_RETURN_BOOL(res >= (float4) bigm_similarity_limit);
+}
+
+Datum
+bigm_word_similarity_op(PG_FUNCTION_ARGS)
+{
+	text	*in1 = PG_GETARG_TEXT_PP(0);
+	text	*in2 = PG_GETARG_TEXT_PP(1);
+	float4	res;
+
+	res = calc_word_similarity(VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
+							   VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
+							   true);
+	PG_FREE_IF_COPY(in1, 0);
+	PG_FREE_IF_COPY(in2, 1);
+	PG_RETURN_BOOL(res >= bigm_word_similarity_limit);
+}
+
+Datum
+bigm_word_similarity_commutator_op(PG_FUNCTION_ARGS)
+{
+	text	*in1 = PG_GETARG_TEXT_PP(0);
+	text	*in2 = PG_GETARG_TEXT_PP(1);
+	float4	res;
+
+	res = calc_word_similarity(VARDATA_ANY(in2), VARSIZE_ANY_EXHDR(in2),
+							   VARDATA_ANY(in1), VARSIZE_ANY_EXHDR(in1),
+							   true);
+	PG_FREE_IF_COPY(in1, 0);
+	PG_FREE_IF_COPY(in2, 1);
+	PG_RETURN_BOOL(res >= bigm_word_similarity_limit);
 }
 
 Datum

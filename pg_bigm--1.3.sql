@@ -25,6 +25,39 @@ CREATE OPERATOR =% (
         JOIN = contjoinsel
 );
 
+CREATE FUNCTION bigm_word_similarity(text,text)
+RETURNS float4
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE FUNCTION bigm_word_similarity_op(text,text)
+RETURNS bool
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT STABLE PARALLEL SAFE;  -- stable because depends on pg_trgm.word_similarity_threshold
+
+CREATE FUNCTION bigm_word_similarity_commutator_op(text,text)
+RETURNS bool
+AS 'MODULE_PATHNAME'
+LANGUAGE C STRICT STABLE PARALLEL SAFE;  -- stable because depends on pg_trgm.word_similarity_threshold
+
+CREATE OPERATOR <=% (
+        LEFTARG = text,
+        RIGHTARG = text,
+        PROCEDURE = bigm_word_similarity_op,
+        COMMUTATOR = '=%>',
+        RESTRICT = contsel,
+        JOIN = contjoinsel
+);
+
+CREATE OPERATOR =%> (
+        LEFTARG = text,
+        RIGHTARG = text,
+        PROCEDURE = bigm_word_similarity_commutator_op,
+        COMMUTATOR = '<=%',
+        RESTRICT = contsel,
+        JOIN = contjoinsel
+);
+
 -- support functions for gin
 CREATE FUNCTION gin_extract_value_bigm(text, internal)
 RETURNS internal
@@ -91,13 +124,13 @@ BEGIN
 END;
 $$;
 
-/* Label whether the function is deemed safe for parallelism */
 DO $$
 DECLARE
     pgversion INTEGER;
 BEGIN
     SELECT current_setting('server_version_num')::INTEGER INTO pgversion;
     IF pgversion >= 90600 THEN
+        /* Label whether the function is deemed safe for parallelism */
         ALTER FUNCTION show_bigm(text) PARALLEL SAFE;
         ALTER FUNCTION bigm_similarity(text, text) PARALLEL SAFE;
         ALTER FUNCTION bigm_similarity_op(text, text) PARALLEL SAFE;
@@ -109,6 +142,9 @@ BEGIN
         ALTER FUNCTION likequery(text) PARALLEL SAFE;
         ALTER FUNCTION pg_gin_pending_stats(index regclass) PARALLEL SAFE;
         ALTER FUNCTION gin_bigm_triconsistent(internal, int2, text, int4, internal, internal, internal) PARALLEL SAFE;
+	/* Support for word similarity search */
+	ALTER OPERATOR FAMILY gin_bigm_ops USING gin ADD
+	      OPERATOR 3      =%> (text, text);
     END IF;
 END;
 $$;
